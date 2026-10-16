@@ -1,0 +1,44 @@
+{
+  "name": "@sandsoftwaresolutions/dir-hash",
+  "version": "0.1.0",
+  "description": "A single fingerprint for a folder and an exact list of what changed: modified, added, removed, renamed.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "hash",
+    "checksum",
+    "integrity",
+    "directory",
+    "manifest"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SandSoftwareSolutions/ss-dir-hash.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SandSoftwareSolutions/ss-dir-hash/issues"
+  },
+  "homepage": "https://github.com/SandSoftwareSolutions/ss-dir-hash#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}
