@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -128,4 +129,60 @@ test("bad arguments", async () => {
   await assert.rejects(hashDirectory(root, { concurrency: 0 }), RangeError);
   await assert.rejects(hashDirectory(join(root, "a.txt")), TypeError);
   await assert.rejects(hashDirectory(join(root, "nope")), { code: "ENOENT" });
+});
+
+test("a hostile ignore pattern cannot make the walk slow", async () => {
+  put(`${"d/".repeat(30)}${"a".repeat(200)}`, "x");
+  const started = Date.now();
+  const m = await hashDirectory(root, { ignore: ["*a*a*a*a*a*a*a*a*a*b", "**/**/**/**/**/**/**/zzz"] });
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+  assert.ok(m.files.length >= 4);
+});
+
+test("the folder itself may be a link to a folder", { skip: process.platform === "win32" }, async () => {
+  const link = join(base, `link${n++}`);
+  symlinkSync(root, link, "dir");
+  assert.deepEqual(await hashDirectory(link), await hashDirectory(root));
+});
+
+test("the sha256sum file is accepted by sha256sum, also for awkward names", { skip: process.platform === "win32" }, async () => {
+  put("with space.txt", "1");
+  put("back\\slash.txt", "2");
+  put("new\nline.txt", "3");
+  put("-dash.txt", "4");
+  const manifest = await hashDirectory(root);
+  const sums = join(root, "..", `sums${n++}.txt`);
+  writeFileSync(sums, toChecksumFile(manifest));
+  const result = spawnSync("sha256sum", ["-c", sums], { cwd: root, encoding: "utf8" });
+  if (result.error?.code === "ENOENT") return; // no sha256sum on this machine
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.stdout.trim().split("\n").length, manifest.files.length);
+});
+
+test("finding renames stays fast with many files", () => {
+  const files = (prefix) => Array.from({ length: 30_000 }, (_, i) => ({ path: `${prefix}/${i}`, size: i, hash: sha(String(i)) }));
+  const before = { algorithm: "sha256", root: "", files: files("old") };
+  const after = { algorithm: "sha256", root: "", files: files("new").reverse() };
+  const started = Date.now();
+  const changes = compareManifests(before, after);
+  assert.equal(changes.renamed.length, 30_000);
+  assert.deepEqual([changes.added.length, changes.removed.length, changes.modified.length], [0, 0, 0]);
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+});
+
+test("copies with the same content are matched one to one when renaming", () => {
+  const f = (path, text) => ({ path, size: text.length, hash: sha(text) });
+  const changes = compareManifests({ files: [f("a", "x"), f("b", "x"), f("c", "y")] }, { files: [f("a2", "x"), f("c", "y"), f("d", "x"), f("e", "x")] });
+  assert.deepEqual(changes.renamed, [{ from: "a", to: "a2" }, { from: "b", to: "d" }]);
+  assert.deepEqual(changes.added, ["e"]);
+  assert.deepEqual(changes.removed, []);
+});
+
+test("a manifest with the wrong shape is refused with a clear error", async () => {
+  const path = join(base, "bad-manifest.json");
+  const good = await hashDirectory(root);
+  for (const bad of [{ ...good, algorithm: "md5" }, { ...good, algorithm: undefined }, { ...good, files: [null] }, { ...good, files: [{ path: "a", size: -1, hash: sha("a") }] }, { ...good, files: [{ path: "a", size: 1, hash: "zz" }] }]) {
+    writeFileSync(path, JSON.stringify(bad));
+    await assert.rejects(readManifest(path), (e) => e instanceof SyntaxError && /not a manifest/.test(e.message));
+  }
 });

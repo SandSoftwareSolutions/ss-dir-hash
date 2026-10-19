@@ -1,16 +1,21 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { createMatcher } from "./ignore.js";
 
 const ALGORITHMS = new Set(["sha256", "sha512"]);
 
+// The size is counted while reading, so size and hash always describe the same bytes, also if the file changes while we read it.
 function hashFile(path, algorithm) {
   return new Promise((resolveHash, reject) => {
     const hash = createHash(algorithm);
-    createReadStream(path).on("error", reject).on("data", (chunk) => hash.update(chunk)).on("end", () => resolveHash(hash.digest("hex")));
+    let size = 0;
+    createReadStream(path).on("error", reject).on("data", (chunk) => {
+      size += chunk.length;
+      hash.update(chunk);
+    }).on("end", () => resolveHash({ size, hash: hash.digest("hex") }));
   });
 }
 
@@ -58,11 +63,10 @@ export async function hashDirectory(root, { algorithm = "sha256", ignore = [], c
   if (!ALGORITHMS.has(algorithm)) throw new RangeError('dir-hash: algorithm must be "sha256" or "sha512"');
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new RangeError("dir-hash: concurrency must be a whole number of at least 1");
   const base = resolve(root);
-  if (!(await lstat(base)).isDirectory()) throw new TypeError(`dir-hash: ${root} is not a folder`);
+  if (!(await stat(base)).isDirectory()) throw new TypeError(`dir-hash: ${root} is not a folder`);
   const files = await collect(base, createMatcher(ignore));
   const hashed = await mapWithLimit(files, concurrency, async ({ path, rel }) => {
-    const info = await lstat(path);
-    return { path: rel, size: info.size, hash: await hashFile(path, algorithm) };
+    return { path: rel, ...(await hashFile(path, algorithm)) };
   });
   return { algorithm, root: rootHash(hashed, algorithm), files: hashed };
 }
@@ -83,15 +87,30 @@ export function compareManifests(before, after) {
     else if (old.hash !== file.hash || old.size !== file.size) modified.push(path);
   }
   for (const [path, file] of was) if (!now.has(path)) removed.push(file);
+  // A removed file and an added file with the same content count as a rename (first removed with first added, in order).
+  const byContent = new Map();
+  added.forEach((file, index) => {
+    const key = `${file.size}\0${file.hash}`;
+    if (!byContent.has(key)) byContent.set(key, []);
+    byContent.get(key).push(index);
+  });
   const renamed = [];
-  for (const gone of [...removed]) {
-    const match = added.find((a) => a.hash === gone.hash && a.size === gone.size);
-    if (match) {
-      renamed.push({ from: gone.path, to: match.path });
-      removed.splice(removed.indexOf(gone), 1);
-      added.splice(added.indexOf(match), 1);
+  const taken = new Set();
+  const stillRemoved = [];
+  for (const gone of removed) {
+    const candidates = byContent.get(`${gone.size}\0${gone.hash}`);
+    const index = candidates?.shift();
+    if (index === undefined) stillRemoved.push(gone);
+    else {
+      renamed.push({ from: gone.path, to: added[index].path });
+      taken.add(index);
     }
   }
+  removed.length = 0;
+  removed.push(...stillRemoved);
+  const stillAdded = added.filter((_, index) => !taken.has(index));
+  added.length = 0;
+  added.push(...stillAdded);
   return { same: !modified.length && !added.length && !removed.length && !renamed.length, modified, added: added.map((f) => f.path), removed: removed.map((f) => f.path), renamed };
 }
 
@@ -101,14 +120,19 @@ export async function verifyDirectory(root, manifest, options = {}) {
   return compareManifests(manifest, now);
 }
 
-/** Reads a hashes file in the `sha256sum` format (`<hash>  <path>`), so you can compare with other tools. */
+/** Writes the hashes in the `sha256sum` format (`<hash>  <path>`), so `sha256sum -c` and other tools can check them. Names with a backslash or a line break are escaped the way GNU does. */
 export function toChecksumFile(manifest) {
-  return manifest.files.map((f) => `${f.hash}  ${f.path}`).join("\n") + (manifest.files.length ? "\n" : "");
+  return manifest.files.map((f) => (/[\\\n\r]/.test(f.path) ? `\\${f.hash}  ${f.path.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r")}` : `${f.hash}  ${f.path}`)).join("\n") + (manifest.files.length ? "\n" : "");
 }
 
 export async function readManifest(path) {
   const data = JSON.parse(await readFile(path, "utf8"));
-  if (!data || !Array.isArray(data.files) || typeof data.root !== "string") throw new SyntaxError(`dir-hash: ${path} is not a manifest`);
+  if (!data || !Array.isArray(data.files) || typeof data.root !== "string" || !ALGORITHMS.has(data.algorithm)) throw new SyntaxError(`dir-hash: ${path} is not a manifest`);
+  const length = data.algorithm === "sha256" ? 64 : 128;
+  for (const f of data.files) {
+    const ok = f && typeof f.path === "string" && !f.path.includes("\0") && Number.isSafeInteger(f.size) && f.size >= 0 && typeof f.hash === "string" && f.hash.length === length && /^[0-9a-f]+$/.test(f.hash);
+    if (!ok) throw new SyntaxError(`dir-hash: ${path} is not a manifest (a file entry is malformed)`);
+  }
   if (rootHash(data.files, data.algorithm) !== data.root) throw new SyntaxError(`dir-hash: ${path} has been edited: its root hash does not match its files`);
   return data;
 }

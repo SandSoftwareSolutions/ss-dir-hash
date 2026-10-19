@@ -27,14 +27,17 @@ const changes = await verifyDirectory("./dist", saved);
 // { same: false, modified: ["app.js"], added: [], removed: ["old.css"], renamed: [{ from: "a.png", to: "logo.png" }] }
 ```
 
-`compareManifests(before, after)` compares two results you already have. `toChecksumFile(manifest)` writes the lines in `sha256sum` format (`<hash>  <path>`) so other tools can check them too.
+`compareManifests(before, after)` compares two results you already have. `toChecksumFile(manifest)` writes the lines in `sha256sum` format (`<hash>  <path>`) so `sha256sum -c` can check them too (names with a backslash or a line break are escaped as GNU does).
 
 ## How it works
 
 - Every regular file is hashed with SHA-256 (or `algorithm: "sha512"`), streamed, so big files do not fill memory; `concurrency` (default 8) files at a time.
 - `root` is a hash over the sorted list of `path`, `size` and file hash. Changing, renaming, adding or removing any file changes it. The same content gives the same `root` on every machine, whatever the order the files were created in.
-- Paths always use `/`. Symbolic links are skipped, not followed.
-- `ignore` takes `.gitignore`-style patterns (`*.log`, `build/`, `!keep.txt`, `**/tmp`).
+- Paths always use `/`. Symbolic links below the folder are skipped, not followed; the folder you pass in may itself be a link to a folder. Names are compared as stored (UTF-16 order, no Unicode normalisation), so macOS (decomposed accents) can give another `root` than Linux for the same accented names.
+- Not covered by the hash: permissions, owners, timestamps, empty folders and links. Only regular files count.
+- `size` is the number of bytes that were hashed, so it always matches `hash`, also if a file changes while it is read.
+- `readManifest` refuses a manifest that has an unknown algorithm or malformed entries.
+- `ignore` takes `.gitignore`-style patterns (`*.log`, `build/`, `!keep.txt`, `**/tmp`), matched without regular expressions, so a hostile pattern cannot make the walk slow.
 - A rename shows up as `renamed`, not as one removed plus one added file.
 
 ## What it is not
