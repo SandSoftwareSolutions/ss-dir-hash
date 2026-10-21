@@ -10,6 +10,8 @@ One fingerprint for a whole folder, and a list of exactly what changed since las
 npm install @sandsoftwaresolutions/dir-hash
 ```
 
+Works with `import` and `require()`, and ships TypeScript types for both.
+
 ## Usage
 
 ```js
